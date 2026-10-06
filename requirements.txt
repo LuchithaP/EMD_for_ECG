@@ -1,0 +1,4 @@
+wfdb 
+numpy 
+scipy 
+matplotlib
