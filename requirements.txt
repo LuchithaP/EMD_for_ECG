@@ -2,3 +2,4 @@ wfdb
 numpy 
 scipy 
 matplotlib
+padasip

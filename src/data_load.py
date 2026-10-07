@@ -53,6 +53,24 @@ def load_noise_data(noise_type: str):
     return noise_signal, fs
 
 
+def add_PLI(frequency, ampl, fs, N):
+    """
+    Generate a Power Line Interference (PLI) signal.
+
+    Parameters:
+    - frequency: float, frequency of the PLI (e.g., 50 or 60 Hz)
+    - ampl: float, amplitude of the PLI
+    - fs: int, sampling frequency
+    - duration: float, duration of the signal in seconds
+
+    Returns:
+    - pli_signal: numpy array, the generated PLI signal
+    """
+    t = np.arange(N) / fs
+    pli_signal = ampl * np.sin(2 * np.pi * frequency * t)
+    return pli_signal
+
+
 def scale_SNR(clean_ecg, noise_signal, desired_snr_db):
     """
     Scale the noise signal to achieve the desired SNR with respect to the clean ECG signal.
@@ -84,7 +102,7 @@ def scale_SNR(clean_ecg, noise_signal, desired_snr_db):
 
 
 def load_noisy_ecg_data(
-    record_path: str, snr_db: float = 10, multiple_noises: list = None
+    record_path: str, snr_db: float = 10, multiple_noises: list = None, PLI=False
 ):
     """
     Load clean ECG data and noise data, ensuring they have the same length.
@@ -99,6 +117,8 @@ def load_noisy_ecg_data(
     - noise_signal: numpy array, the noise signal
     - fs: int, sampling frequency of the signals
     """
+
+    pli = None  # Initialize PLI as None
     clean_ecg, fs_clean = load_ecg_data(record_path)
     noise_signal = np.zeros_like(clean_ecg)  # Initialize noise signal with zeros
     if multiple_noises is not None:
@@ -106,6 +126,13 @@ def load_noisy_ecg_data(
             noise, fs_noise = load_noise_data(noise_type)
             noise_signal = noise_signal + noise
     # noise_signal, fs_noise = load_noise_data(noise_type)
+    a = (
+        max(clean_ecg) * 0.1
+    )  # Amplitude of PLI is set to 10% of the max amplitude of the clean ECG
+    samples = len(noise_signal)
+    if PLI is True:
+        pli = add_PLI(60, a, fs_clean, samples)
+        noise_signal = noise_signal + pli
     scaled_noise_signal = scale_SNR(clean_ecg, noise_signal, snr_db)
 
     # Ensure both signals have the same sampling frequency
@@ -119,4 +146,4 @@ def load_noisy_ecg_data(
     clean_ecg = clean_ecg[:N]
     noise_signal = scaled_noise_signal[:N]
 
-    return clean_ecg, noise_signal, noisy_ecg, fs_clean
+    return clean_ecg, noise_signal, noisy_ecg, fs_clean, pli
