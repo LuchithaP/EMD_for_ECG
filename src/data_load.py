@@ -1,5 +1,32 @@
-import wfdb
+from pathlib import Path
+
 import numpy as np
+import wfdb
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MITDB_DIR = PROJECT_ROOT / "data" / "physionet.org" / "files" / "mitdb" / "1.0.0"
+NSTDB_DIR = PROJECT_ROOT / "data" / "physionet.org" / "files" / "nstdb" / "1.0.0"
+
+NOISE_TYPES = ("bw", "ma", "em")
+PLI_FREQ = 60.0
+
+# Sec. IV: "the noises all have been shifted and passed through different filters to get
+# noises that are not equal but correlated to the adaptive filters' reference noises".
+# The paper gives no delays or filters, so these are fixed choices: (delay in samples,
+# FIR low-pass taps with unit DC gain), a different filter for each noise.
+NOISE_PATHS = {
+    "bw": (3, [0.6, 0.4]),
+    "em": (5, [0.4, 0.3, 0.2, 0.1]),
+    "ma": (4, [0.5, 0.3, 0.2]),
+}
+
+
+def record_path(record) -> str:
+    """Return the WFDB path of an MIT-BIH record given its number (e.g. 100) or a path."""
+    record = str(record)
+    if Path(record).parent != Path("."):
+        return record
+    return str(MITDB_DIR / record)
 
 
 def load_ecg_data(record_path: str):
@@ -33,16 +60,10 @@ def load_noise_data(noise_type: str):
     - noise_signal: numpy array, the noise signal
     - fs: int, sampling frequency of the noise signal
     """
-    if noise_type == "bw":
-        record_path = r"C:\Users\Luchitha\Documents\Python\EMD_for_ECG\data\physionet.org\files\nstdb\1.0.0\bw"
-    elif noise_type == "ma":
-        record_path = r"C:\Users\Luchitha\Documents\Python\EMD_for_ECG\data\physionet.org\files\nstdb\1.0.0\ma"
-    elif noise_type == "em":
-        record_path = r"C:\Users\Luchitha\Documents\Python\EMD_for_ECG\data\physionet.org\files\nstdb\1.0.0\em"
-    else:
+    if noise_type not in NOISE_TYPES:
         raise ValueError("Invalid noise type. Choose from 'bw', 'ma', or 'em'.")
 
-    record = wfdb.rdrecord(record_path)
+    record = wfdb.rdrecord(str(NSTDB_DIR / noise_type))
 
     # Extract the noise signal and sampling frequency
     noise_signal = record.p_signal[
@@ -53,7 +74,7 @@ def load_noise_data(noise_type: str):
     return noise_signal, fs
 
 
-def add_PLI(frequency, ampl, fs, N):
+def add_PLI(frequency, ampl, fs, N, phase=0.0):
     """
     Generate a Power Line Interference (PLI) signal.
 
@@ -61,13 +82,14 @@ def add_PLI(frequency, ampl, fs, N):
     - frequency: float, frequency of the PLI (e.g., 50 or 60 Hz)
     - ampl: float, amplitude of the PLI
     - fs: int, sampling frequency
-    - duration: float, duration of the signal in seconds
+    - N: int, number of samples
+    - phase: float, phase in radians
 
     Returns:
     - pli_signal: numpy array, the generated PLI signal
     """
     t = np.arange(N) / fs
-    pli_signal = ampl * np.sin(2 * np.pi * frequency * t)
+    pli_signal = ampl * np.sin(2 * np.pi * frequency * t + phase)
     return pli_signal
 
 
@@ -83,22 +105,69 @@ def scale_SNR(clean_ecg, noise_signal, desired_snr_db):
     Returns:
     - scaled_noise: numpy array, the scaled noise signal
     """
-    # Calculate the power of the clean ECG signal
-    power_clean = np.mean(clean_ecg**2)
+    return noise_signal * snr_scale_factor(clean_ecg, noise_signal, desired_snr_db)
 
-    # Calculate the desired power of the noise signal based on the desired SNR
-    desired_power_noise = power_clean / (10 ** (desired_snr_db / 10))
 
-    # Calculate the current power of the noise signal
-    power_noise = np.mean(noise_signal**2)
+def snr_scale_factor(clean_ecg, noise_signal, desired_snr_db):
+    """Gain that brings noise_signal to desired_snr_db relative to clean_ecg (Eq. 4)."""
+    return np.sqrt(np.sum(clean_ecg**2) / (np.sum(noise_signal**2) * 10 ** (desired_snr_db / 10)))
 
-    # Calculate the scaling factor for the noise signal
-    scaling_factor = np.sqrt(desired_power_noise / power_noise)
 
-    # Scale the noise signal
-    scaled_noise = noise_signal * scaling_factor
+def shift_and_filter(reference, delay, taps):
+    """Noise reaching the ECG: the reference delayed by `delay` samples and FIR filtered."""
+    h = np.concatenate([np.zeros(delay), taps])
+    return np.convolve(reference, h)[: len(reference)]
 
-    return scaled_noise
+
+def make_noisy_ecg(record, noises=("bw", "em", "ma"), pli=True, snr_db=10.0):
+    """
+    Build one test case as described in Sec. IV of the paper.
+
+    - Clean ECG: the whole MIT-BIH Arrhythmia record (channel 0), not preprocessed.
+    - BW, EM, MA: the whole MIT-BIH Noise Stress Test records at their recorded
+      amplitudes. The reference noise is the record itself; the noise added to the ECG
+      is the shifted and filtered reference (NOISE_PATHS).
+    - PLI: a 60 Hz sinusoid with the same power as the BW noise. The paper shifts and
+      filters only BW, EM and MA, so the PLI reference equals the added PLI.
+    - The total noise is scaled so that the input SNR (Eq. 4) equals snr_db. References
+      are scaled by the same gain.
+
+    Returns a dict with:
+    - clean, noisy, noise: clean ECG, clean + noise, total added noise
+    - components: {name: noise component added to the ECG}
+    - references: {name: reference noise given to that noise's adaptive filter}
+    - fs: sampling frequency
+    """
+    clean, fs = load_ecg_data(record_path(record))
+    n = len(clean)
+
+    components, references = {}, {}
+    for name in noises:
+        ref, fs_noise = load_noise_data(name)
+        if fs_noise != fs:
+            raise ValueError("Sampling frequencies of clean ECG and noise do not match.")
+        ref = ref[:n]
+        references[name] = ref
+        components[name] = shift_and_filter(ref, *NOISE_PATHS[name])
+    if pli:
+        bw = shift_and_filter(load_noise_data("bw")[0][:n], *NOISE_PATHS["bw"])
+        amplitude = np.sqrt(2 * np.mean(bw**2))
+        references["pli"] = components["pli"] = add_PLI(PLI_FREQ, amplitude, fs, n)
+
+    total = sum(components.values())
+    gain = snr_scale_factor(clean, total, snr_db)
+    components = {k: v * gain for k, v in components.items()}
+    references = {k: v * gain for k, v in references.items()}
+    noise = total * gain
+
+    return {
+        "clean": clean,
+        "noisy": clean + noise,
+        "noise": noise,
+        "components": components,
+        "references": references,
+        "fs": fs,
+    }
 
 
 def load_noisy_ecg_data(
@@ -107,43 +176,44 @@ def load_noisy_ecg_data(
     """
     Load clean ECG data and noise data, ensuring they have the same length.
 
+    Used by the earlier notebooks. The returned noise is the exact noise that was
+    added. Use make_noisy_ecg for the paper's setup.
+
     Parameters:
     - record_path: str, path to the WFDB record for clean ECG (without file extension)
     - snr_db: float, desired SNR in dB
     - multiple_noises: list of str, types of noise to add ('bw', 'ma', or 'em')
+    - PLI: bool, whether to add 60 Hz power line interference
 
     Returns:
     - clean_ecg: numpy array, the clean ECG signal
     - noise_signal: numpy array, the noise signal
+    - noisy_ecg: numpy array, clean_ecg + noise_signal
     - fs: int, sampling frequency of the signals
+    - pli: numpy array or None, the unscaled PLI signal
     """
-
-    pli = None  # Initialize PLI as None
     clean_ecg, fs_clean = load_ecg_data(record_path)
-    noise_signal = np.zeros_like(clean_ecg)  # Initialize noise signal with zeros
-    if multiple_noises is not None:
-        for noise_type in multiple_noises:
-            noise, fs_noise = load_noise_data(noise_type)
-            noise_signal = noise_signal + noise
-    # noise_signal, fs_noise = load_noise_data(noise_type)
-    a = (
-        max(clean_ecg) * 0.1
-    )  # Amplitude of PLI is set to 10% of the max amplitude of the clean ECG
-    samples = len(noise_signal)
-    if PLI is True:
-        pli = add_PLI(60, a, fs_clean, samples)
+
+    noise_signal = np.zeros_like(clean_ecg)
+    for noise_type in multiple_noises or []:
+        noise, fs_noise = load_noise_data(noise_type)
+        if fs_clean != fs_noise:
+            raise ValueError("Sampling frequencies of clean ECG and noise do not match.")
+        N = min(len(noise_signal), len(noise))
+        noise_signal = noise_signal[:N] + noise[:N]
+
+    pli = None
+    if PLI:
+        # Amplitude of PLI is set to 10% of the max amplitude of the clean ECG
+        pli = add_PLI(PLI_FREQ, max(clean_ecg) * 0.1, fs_clean, len(noise_signal))
         noise_signal = noise_signal + pli
-    scaled_noise_signal = scale_SNR(clean_ecg, noise_signal, snr_db)
 
-    # Ensure both signals have the same sampling frequency
-    if fs_clean != fs_noise:
-        raise ValueError("Sampling frequencies of clean ECG and noise do not match.")
+    if not np.any(noise_signal):
+        raise ValueError("Select at least one noise type or PLI=True.")
 
-    # Truncate both signals to the same length
-    N = min(len(clean_ecg), len(scaled_noise_signal))
-
-    noisy_ecg = clean_ecg[:N] + scaled_noise_signal[:N]
+    N = min(len(clean_ecg), len(noise_signal))
     clean_ecg = clean_ecg[:N]
-    noise_signal = scaled_noise_signal[:N]
+    noise_signal = scale_SNR(clean_ecg, noise_signal[:N], snr_db)
+    noisy_ecg = clean_ecg + noise_signal
 
     return clean_ecg, noise_signal, noisy_ecg, fs_clean, pli

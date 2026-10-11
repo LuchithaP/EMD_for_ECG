@@ -1,5 +1,6 @@
-wfdb 
-numpy 
-scipy 
+wfdb
+numpy
+scipy
 matplotlib
-padasip
+numba
+pandas

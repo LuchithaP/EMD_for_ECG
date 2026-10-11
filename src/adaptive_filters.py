@@ -1,142 +1,157 @@
+"""
+Adaptive noise cancellers (Fig. 1 of the paper) and the metrics of Eqs. (4)-(6).
+
+The paper uses "default parameters in MATLAB" for LMS, NLMS and RLS, so the defaults
+here are those of dsp.LMSFilter and dsp.RLSFilter:
+- LMS:  Length 32, StepSize 0.1, zero initial weights
+- NLMS: Length 32, StepSize 0.1, zero initial weights
+- RLS:  Length 32, ForgettingFactor 1, InitialInverseCovariance 1 (identity), zero weights
+
+Each filter sees the reference through a tapped delay line with zero initial states,
+so the output has the same length as the input and stays sample-aligned. The loops
+are compiled with numba; a full 30-minute MIT-BIH record takes well under a second.
+"""
 import numpy as np
-import matplotlib.pyplot as plt
-import padasip as pa
+from numba import njit
+
+FILTER_ORDER = 32
 
 
-def LMS_filter(noisy_signal, reference_signal, mu, filter_order, N):
+@njit(cache=True)
+def _lms(d, x, mu, L, normalized):
+    w = np.zeros(L)
+    u = np.zeros(L)
+    e = np.empty(len(d))
+    eps = np.finfo(np.float64).eps
+    for n in range(len(d)):
+        u[1:] = u[:-1]
+        u[0] = x[n]
+        e[n] = d[n] - np.dot(w, u)
+        if normalized:
+            w += mu * e[n] * u / (eps + np.dot(u, u))
+        else:
+            w += mu * e[n] * u
+    return e
+
+
+@njit(cache=True)
+def _rls(d, x, lam, L, p0):
+    w = np.zeros(L)
+    u = np.zeros(L)
+    P = np.eye(L) * p0
+    e = np.empty(len(d))
+    for n in range(len(d)):
+        u[1:] = u[:-1]
+        u[0] = x[n]
+        Pu = P @ u
+        k = Pu / (lam + np.dot(u, Pu))
+        e[n] = d[n] - np.dot(w, u)
+        w += k * e[n]
+        P = (P - np.outer(k, Pu)) / lam
+    return e
+
+
+def _trim(noisy_signal, reference_signal, N):
+    N = min(len(noisy_signal), len(reference_signal)) if not N else N
+    return np.asarray(noisy_signal[:N], float), np.asarray(reference_signal[:N], float)
+
+
+def LMS_filter(noisy_signal, reference_signal, mu=0.1, filter_order=FILTER_ORDER, N=None):
     """
-    Apply LMS adaptive filtering to remove noise from a signal.
+    Apply LMS adaptive noise cancellation (Fig. 1 of the paper).
 
     Parameters:
     noisy_signal (numpy.ndarray): The noisy input signal (desired signal d).
-    reference_signal (numpy.ndparray): The reference noise signal.
+    reference_signal (numpy.ndarray): The reference noise signal.
     mu (float): The step size for the LMS algorithm.
     filter_order (int): The order of the adaptive filter (number of taps).
-    N (int): The number of samples in the signal.
+    N (int): The number of samples to process (default: all).
 
     Returns:
-    numpy.ndarray: The filtered output signal (error signal e).
+    numpy.ndarray: The error signal e = d - y, i.e. the denoised signal.
     """
-    # 1. Prepare the reference signal as a delay-embedded matrix (input matrix X)
-    X = pa.input_from_history(reference_signal, filter_order)
-
-    # 2. Align the desired signal (noisy_signal) to match the length of X
-    # padasip input_from_history shortens the array length by (filter_order - 1)
-    d = noisy_signal[filter_order - 1 :]
-
-    # 3. Initialize the adaptive filter
-    lms = pa.filters.FilterLMS(n=filter_order, mu=mu)
-
-    # 4. Apply the LMS filter
-    y, e, w = lms.run(d, X)
-
-    denoised_signal = e  # The error signal represents the denoised output
-
-    return denoised_signal
+    d, ref = _trim(noisy_signal, reference_signal, N)
+    return _lms(d, ref, mu, filter_order, False)
 
 
-def NLMS_filter(noisy_signal, reference_signal, mu, filter_order, N):
+def NLMS_filter(noisy_signal, reference_signal, mu=0.1, filter_order=FILTER_ORDER, N=None):
     """
-    Apply NLMS adaptive filtering to remove noise from a signal.
+    Apply NLMS adaptive noise cancellation.
 
     Parameters:
     noisy_signal (numpy.ndarray): The noisy input signal.
     reference_signal (numpy.ndarray): The reference signal (noise).
-    mu (float): The step size for the NLMS algorithm.
+    mu (float): The normalised step size.
     filter_order (int): The order of the adaptive filter.
-    N (int): The number of samples in the signal.
+    N (int): The number of samples to process (default: all).
 
     Returns:
-    numpy.ndarray: The filtered output signal.
+    numpy.ndarray: The error signal, i.e. the denoised signal.
     """
-
-    # Initialize the adaptive filter
-    nlms = pa.filters.FilterNLMS(n=filter_order, mu=mu, eps=1e-6)
-
-    # Prepare the input signals
-    X = pa.input_from_history(reference_signal, filter_order)
-    d = noisy_signal[filter_order - 1 :]  # Desired signal
-
-    # Apply the NLMS filter
-    y, e, w = nlms.run(d, X)
-
-    denoised_signal = e  # The error signal is the denoised output
-
-    return denoised_signal
+    d, ref = _trim(noisy_signal, reference_signal, N)
+    return _lms(d, ref, mu, filter_order, True)
 
 
-def RLS_filter(noisy_signal, reference_signal, mu=0.99, filter_order=32, eps=0.01, N=0):
+def RLS_filter(noisy_signal, reference_signal, mu=1.0, filter_order=FILTER_ORDER, eps=1.0, N=None):
     """
     RLS adaptive noise cancellation.
 
     Parameters:
-    noisy_signal : (np.ndarray)Noisy ECG signal. This is the desired signal d(n).
-    reference_signal : (np.ndarray)Reference noise signal correlated with the noise
-        present in noisy_signal.
-    mu : (float ) RLS forgetting factor. Usually close to 1.
-    filter_order : (int)Number of adaptive filter taps.
-    eps : (float)Initialisation parameter for the RLS covariance matrix.
+    noisy_signal : (np.ndarray) Noisy signal. This is the desired signal d(n).
+    reference_signal : (np.ndarray) Reference noise correlated with the noise in
+        noisy_signal.
+    mu : (float) RLS forgetting factor.
+    filter_order : (int) Number of adaptive filter taps.
+    eps : (float) The initial inverse covariance matrix is identity / eps.
+    N : (int) The number of samples to process (default: all).
 
     Returns:
-    denoised_signal : (np.ndarray)
-        Error signal e(n) = d(n) - y(n).
-
+    denoised_signal : (np.ndarray) Error signal e(n) = d(n) - y(n).
     """
+    d, ref = _trim(noisy_signal, reference_signal, N)
+    return _rls(d, ref, mu, filter_order, 1.0 / eps)
 
-    noisy_signal = noisy_signal[:N]
-    reference_signal = reference_signal[:N]
 
-    # Construct tapped-delay reference input
+def snr_db(clean_signal, test_signal):
+    """Eq. (4): 10 log10( sum xc^2 / sum (x - xc)^2 )."""
+    return 10 * np.log10(np.sum(clean_signal**2) / np.sum((test_signal - clean_signal) ** 2))
 
-    X = pa.input_from_history(reference_signal, filter_order)
-    d = noisy_signal[filter_order - 1 :]
 
-    # Create RLS filter
+def rmse(clean_signal, test_signal):
+    """Eq. (5)."""
+    return np.sqrt(np.mean((test_signal - clean_signal) ** 2))
 
-    rls = pa.filters.FilterRLS(n=filter_order, mu=mu, eps=eps, w="zeros")
 
-    # Run adaptive filter
-
-    estimated_noise, error, weights = rls.run(d, X)
-
-    # error = desired signal - estimated noise
-    denoised_signal = error
-
-    return denoised_signal
+def snr_improvement(clean_signal, noisy_signal, denoised_signal):
+    """Eq. (6): SNR_output - SNR_input."""
+    return snr_db(clean_signal, denoised_signal) - snr_db(clean_signal, noisy_signal)
 
 
 def evaluate_filter_performance(clean_signal, denoised_signal, noise_signal):
     """
-    Evaluate denoising performance over the samples produced by the filter.
+    Evaluate denoising performance (Eqs. 4-6 of the paper).
 
     Parameters:
     clean_signal (numpy.ndarray): The original clean signal.
     denoised_signal (numpy.ndarray): The denoised signal after filtering.
-    noise_signal (numpy.ndarray): The noise signal.
+    noise_signal (numpy.ndarray): The noise that was added to the clean signal.
 
     Returns:
     tuple: SNR, RMSE, and SNR improvement.
     """
-    denoised_length = len(denoised_signal)
-    if denoised_length == 0:
+    n = len(denoised_signal)
+    if n == 0:
         raise ValueError("denoised_signal must contain at least one sample.")
-    if len(clean_signal) < denoised_length or len(noise_signal) < denoised_length:
+    if len(clean_signal) < n or len(noise_signal) < n:
         raise ValueError(
             "clean_signal and noise_signal must be at least as long as denoised_signal."
         )
 
-    # Adaptive filters omit their initial filter_order - 1 samples.
-    clean_signal = clean_signal[-denoised_length:]
-    noise_signal = noise_signal[-denoised_length:]
+    # Shorter outputs (e.g. from filters that drop the first taps) are aligned on the end.
+    clean_signal = clean_signal[-n:]
+    noise_signal = noise_signal[-n:]
 
-    signal_power = np.sum(clean_signal**2)
-    error_power = np.sum((clean_signal - denoised_signal) ** 2)
-    noise_power = np.sum(noise_signal**2)
-
-    SNR = 10 * np.log10(signal_power / error_power)
-
-    RMSE = np.sqrt(np.mean((clean_signal - denoised_signal) ** 2))
-
-    # SNR improvement (SNR_OUT - SNR_IN)
-    SNR_impr = 10 * np.log10(noise_power / error_power)
+    SNR = snr_db(clean_signal, denoised_signal)
+    RMSE = rmse(clean_signal, denoised_signal)
+    SNR_impr = snr_improvement(clean_signal, clean_signal + noise_signal, denoised_signal)
     return SNR, RMSE, SNR_impr
