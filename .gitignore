@@ -1,0 +1,4 @@
+__pycache__/
+*.nbi
+*.nbc
+.ipynb_checkpoints/
