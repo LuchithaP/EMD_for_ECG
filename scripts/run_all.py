@@ -7,7 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-STEPS = ["01_tune_lms.py", "02_bw_pli.py", "03_four_methods.py", "04_ecg_norm_check.py"]
+STEPS = ["01_imf_selection.py", "02_tune_filters.py", "03_bw_pli.py", "04_four_noises.py",
+         "05_compare_with_paper.py"]
 
 if __name__ == "__main__":
     here = Path(__file__).resolve().parent

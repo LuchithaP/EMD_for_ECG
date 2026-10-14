@@ -1,115 +1,133 @@
 """
 Denoising structures of the paper (Sec. III).
 
-Every adaptive filter is called as f(d, noise): it removes `noise` ("pli", "bw", "em",
-"ma", or "all" = the sum of all references) from the signal d. make_filter builds f
-from the reference noises and the LMS settings, so each noise gets its own step size
-and number of taps.
+Every method takes the noisy ECG, its IMFs (imfs[0] = IMF1) and residue r, and a
+FilterBank f; f(d, noise) runs the adaptive filter of `noise` on the signal d and returns
+the denoised d. Each noise has its own filter setting (step size, taps).
 
-EMD-based methods use the IMFs of the noisy ECG (imfs[0] = IMF1) and the residue r.
-With FILTER_RESIDUE (src/config.py) the BW and EM branches also filter the residue.
+    METHODS[name] -> Method(function, algorithm, filter names)
+    denoise(name, case, imfs, r, params) -> denoised ECG
 """
-from src.config import FILTER_RESIDUE, N_IMFS
+from dataclasses import dataclass
+
+import numpy as np
+
+from src.config import RLS_P0
 from src.emd import imf_sum
-from src.filters import lms
+from src.filters import ALGORITHMS, lms_parallel
 
 
-def make_filter(refs, settings, algorithm=lms):
-    """
-    f(d, noise) -> denoised d.
+class FilterBank:
+    """The adaptive filters of one method: f(d, noise) -> d with that noise removed."""
 
-    settings: {noise: {"mu": ..., "taps": ...}} for LMS / NLMS, or
-              {noise: {"lam": ..., "taps": ..., "p0": ...}} for RLS.
-    """
-    def f(d, noise):
-        ref = sum(refs.values()) if noise == "all" else refs[noise]
-        return algorithm(d, ref, **settings[noise])
-    return f
+    def __init__(self, algorithm, refs, params):
+        self.algorithm, self.refs, self.params = algorithm, refs, params
 
+    def reference(self, noise):
+        """Reference of one noise; "all" = the sum of all references (PDAF)."""
+        return np.sum(list(self.refs.values()), axis=0) if noise == "all" else self.refs[noise]
 
-def branch(imfs, r, first, last):
-    """
-    Filter input for IMF<first>..IMF<last>. A branch that ends at IMF8 also gets the
-    residue (minus its mean) if FILTER_RESIDUE.
-    """
-    x = imf_sum(imfs, first, last)
-    if FILTER_RESIDUE and last == N_IMFS:
-        x = x + r - r.mean()
-    return x
+    def __call__(self, d, noise):
+        settings = dict(self.params[noise])
+        if self.algorithm == "RLS":
+            settings.setdefault("p0", RLS_P0)
+        return ALGORITHMS[self.algorithm](d, self.reference(noise), **settings)
+
+    def parallel(self, d, noise1, noise2):
+        """Two LMS filters on the same signal with one shared error (Fig. 5)."""
+        return lms_parallel(d, self.refs[noise1], self.refs[noise2],
+                            self.params[noise1], self.params[noise2])
 
 
-def untouched_residue(r):
-    """The part of the residue no filter sees: all of it, or only its mean if FILTER_RESIDUE."""
-    return r.mean() if FILTER_RESIDUE else r
+# ------------------------------------------------------------------ Sec. III-A
 
 
 def fig2(noisy, imfs, r, imf_range, f, noise):
     """
-    Fig. 2: filter only the IMFs in imf_range (first, last), then add back the other
-    IMFs and the residue. imf_range None filters the whole signal (no EMD).
+    Fig. 2: filter the sum of the IMFs in imf_range = (first, last), then add back the
+    other IMFs and the residue: Y = noisy - used + f(used). None filters the whole signal.
     """
     if imf_range is None:
         return f(noisy, noise)
-    used = branch(imfs, r, *imf_range)
+    used = imf_sum(imfs, *imf_range)
     return noisy - used + f(used, noise)
 
 
-def emd_bw_pli(imfs, r, f):
+# ------------------------------------------------------------------ BW + PLI
+
+
+def eq1(noisy, imfs, r, f):
     """Fig. 3 / Eq. (1): Y = IMF1' + IMF2 + IMF3 + IMF4 + IMF'58 + r."""
-    imf1_d = f(imfs[0], "pli")
-    imf58_d = f(branch(imfs, r, 5, 8), "bw")
-    return imf1_d + imf_sum(imfs, 2, 4) + imf58_d + untouched_residue(r)
+    return f(imfs[0], "pli") + imf_sum(imfs, 2, 4) + f(imf_sum(imfs, 5, 8), "bw") + r
 
 
-def direct_bw_pli(noisy, f):
-    """BW + PLI without EMD: PLI and BW filters in parallel on the noisy ECG (Thakor & Zhu [13])."""
-    pli_estimate = noisy - f(noisy, "pli")
-    bw_estimate = noisy - f(noisy, "bw")
-    return noisy - pli_estimate - bw_estimate
+# ------------------------------------------------------------------ BW + PLI + EM + MA
 
 
-def peaf(imfs, r, f_emd, f_direct):
+def peaf(noisy, imfs, r, f):
     """
-    Fig. 4(a) / Eq. (2), Parallel EMD Adaptive Filter.
-
-    X' = IMF1' + IMF2 + IMF'38 + IMF'58 + r - (IMF5 + ... + IMF8)
-    Y  = MA filter on X' (MA uses no EMD).
+    Parallel EMD Adaptive Filter, Fig. 4(a) / Eq. (2):
+    X' = IMF1' + IMF2 + IMF'38 + IMF'58 + r - (IMF5 + ... + IMF8),  Y = MA filter on X'.
     """
-    imf1_d = f_emd(imfs[0], "pli")
-    imf38_d = f_emd(branch(imfs, r, 3, 8), "em")
-    imf58 = branch(imfs, r, 5, 8)
-    imf58_d = f_emd(imf58, "bw")
-    # IMF5-8 (and the filtered residue) are in both branches: subtract one copy
-    x = imf1_d + imfs[1] + imf38_d + imf58_d - imf58 + untouched_residue(r)
-    return f_direct(x, "ma")
+    imf58 = imf_sum(imfs, 5, 8)
+    x = (f(imfs[0], "pli") + imfs[1] + f(imf_sum(imfs, 3, 8), "em") + f(imf58, "bw")
+         + r - imf58)
+    return f(x, "ma")
 
 
-def seaf(imfs, r, f_emd, f_direct):
+def seaf(noisy, imfs, r, f):
     """
-    Fig. 4(b) / Eq. (3), Staged EMD Adaptive Filter.
-
-    IMF'58  = BW filter on IMF5 + ... + IMF8
-    IMF''38 = EM filter on IMF3 + IMF4 + IMF'58
-    X' = IMF1' + IMF2 + IMF''38 + r
-    Y  = MA filter on X'.
+    Staged EMD Adaptive Filter, Fig. 4(b) / Eq. (3):
+    IMF'58 = BW filter on IMF5~8,  IMF''38 = EM filter on IMF3 + IMF4 + IMF'58,
+    X' = IMF1' + IMF2 + IMF''38 + r,  Y = MA filter on X'.
     """
-    imf1_d = f_emd(imfs[0], "pli")
-    imf58_d = f_emd(branch(imfs, r, 5, 8), "bw")
-    imf38_dd = f_emd(imfs[2] + imfs[3] + imf58_d, "em")
-    x = imf1_d + imfs[1] + imf38_dd + untouched_residue(r)
-    return f_direct(x, "ma")
+    imf58_d = f(imf_sum(imfs, 5, 8), "bw")
+    imf38_dd = f(imfs[2] + imfs[3] + imf58_d, "em")
+    x = f(imfs[0], "pli") + imfs[1] + imf38_dd + r
+    return f(x, "ma")
 
 
-def sdaf(noisy, f_direct):
+def sdaf(noisy, imfs, r, f):
     """
-    Fig. 5, Staged Direct Adaptive Filter, no EMD: PLI and BW filters in parallel,
-    then the EM filter, then the MA filter.
+    Staged Direct Adaptive Filter, Fig. 5 (no EMD): PLI and BW filters in parallel on the
+    noisy ECG (Thakor & Zhu [13]), then the EM filter, then the MA filter.
     """
-    x = direct_bw_pli(noisy, f_direct)
-    x = f_direct(x, "em")
-    return f_direct(x, "ma")
+    x = f.parallel(noisy, "pli", "bw")
+    return f(f(x, "em"), "ma")
 
 
-def pdaf(noisy, f_direct):
-    """Parallel Direct Adaptive Filter: all noises as one, one filter with the summed reference."""
-    return f_direct(noisy, "all")
+def pdaf(noisy, imfs, r, f):
+    """Parallel Direct Adaptive Filter: all noises as one, one filter on the noisy ECG (Fig. 1)."""
+    return f(noisy, "all")
+
+
+# ------------------------------------------------------------------ registry
+
+
+@dataclass(frozen=True)
+class Method:
+    function: callable
+    algorithm: str  # "LMS", "NLMS" or "RLS"
+    filters: tuple  # names of its adaptive filters, in signal-flow order
+    uses_emd: bool = True
+
+
+METHODS = {
+    # BW + PLI (Figs. 6-8)
+    "EMD+LMS": Method(eq1, "LMS", ("pli", "bw")),
+    "EMD+NLMS": Method(eq1, "NLMS", ("pli", "bw")),
+    "EMD+RLS": Method(eq1, "RLS", ("pli", "bw")),
+    # BW + PLI + EM + MA (Figs. 9-11)
+    "PEAF": Method(peaf, "LMS", ("pli", "bw", "em", "ma")),
+    "SEAF": Method(seaf, "LMS", ("pli", "bw", "em", "ma")),
+    "PDAF": Method(pdaf, "LMS", ("all",), uses_emd=False),
+    "SDAF": Method(sdaf, "LMS", ("pli", "bw", "em", "ma"), uses_emd=False),
+}
+BW_PLI_METHODS = ["EMD+LMS", "EMD+NLMS", "EMD+RLS"]
+FOUR_NOISE_METHODS = ["PEAF", "SEAF", "PDAF", "SDAF"]
+
+
+def denoise(name, case, imfs, r, params):
+    """Run method `name` on one case with filter settings params = {filter: settings}."""
+    m = METHODS[name]
+    return m.function(case["noisy"], imfs, r, FilterBank(m.algorithm, case["refs"], params))

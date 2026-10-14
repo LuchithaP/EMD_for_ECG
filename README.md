@@ -1,6 +1,6 @@
 # ECG denoising with EMD + adaptive filters
 
-Reproduction of Dai & Bai, *Denoising ECG by Adaptive Filter with Empirical Mode
+Reproduction of B. Dai and W. Bai, *Denoising ECG by Adaptive Filter with Empirical Mode
 Decomposition* (`paper.pdf`).
 
 ## Run
@@ -10,131 +10,133 @@ pip install -r requirements.txt
 python scripts/run_all.py
 ```
 
-or one step at a time (step 1 must run first; ~15 min in total on 4 cores):
+Takes about 20 min on 8 cores. Or run one step at a time (step 2 must run before 3 and 4):
 
-| Script | What it does | Output |
+| Script | Paper | Output |
 |---|---|---|
-| `scripts/01_tune_lms.py` | finds the optimum LMS step size and taps for every filter | `results/lms_params.json`, `lms_tuning*.csv`, `figures/lms_tuning_*.png` |
-| `scripts/02_bw_pli.py` | BW + PLI, Eq. (1), LMS vs NLMS vs RLS (Figs. 6, 7, 8) | `results/bw_pli.csv`, `figures/fig6-8_*.png` |
-| `scripts/03_four_methods.py` | BW + PLI + EM + MA, PEAF / SEAF / PDAF / SDAF (Figs. 9, 10, 11) | `results/four_methods.csv`, `figures/fig9-11_*.png` |
-| `scripts/04_ecg_norm_check.py` | raw vs normalized ECG | `results/ecg_norm_check.csv`, `figures/ecg_norm_check.png` |
+| `scripts/01_imf_selection.py` | Sec. III-A: best IMFs for each noise | `results/imf_selection.csv`, `figures/imf_selection_*.png`, `figures/emd_imfs_*.png` |
+| `scripts/02_tune_filters.py` | filter settings (not in the paper) | `results/tuned_filter_params.json`, `filter_tuning_scores.csv`, `figures/filter_tuning_*.png` |
+| `scripts/03_bw_pli.py` | Sec. IV-A, Figs. 6, 7, 8 | `results/bw_pli.csv`, `figures/fig6_*`, `fig7a_*`, `fig7b_*`, `fig8_*` |
+| `scripts/04_four_noises.py` | Sec. IV-B, Figs. 9, 10, 11 | `results/four_noises.csv`, `figures/fig9_*`, `fig10_*`, `fig11_*` |
+| `scripts/05_compare_with_paper.py` | all claims | `results/comparison_with_paper.md` |
 
-Every figure exists twice: `*_raw.png` (ECG as recorded) and `*_norm.png` (ECG normalized).
+In every comparison plot, "X ours" is a solid line or filled bar, and "X paper" is a dashed
+line or hatched bar in the same color. The paper's numbers (`src/paper_values.py`) were
+measured from the PDF figures at 450 dpi (about ±0.2 dB).
 
-Notebooks (read `results/`, run the scripts first):
+Notebooks (they read `results/`, so run the scripts first):
 
 | Notebook | Contents |
 |---|---|
-| `notebooks/01_data_and_emd.ipynb` | one noisy ECG, its IMFs, and which IMFs each noise lands in (computed live) |
-| `notebooks/02_lms_tuning.ipynb` | chosen LMS step size and taps per filter, tuning heatmaps |
-| `notebooks/03_bw_pli.ipynb` | BW + PLI: tables and Figs. 6, 7, 8 |
-| `notebooks/04_four_methods.ipynb` | BW + PLI + EM + MA: tables and Figs. 9, 10, 11 |
-| `notebooks/05_ecg_normalization.ipynb` | raw vs normalized ECG, DC offset of each record |
-| `notebooks/06_paper_claims.ipynb` | every claim of the paper with our numbers and a Yes / Partly / No verdict |
-
-`python -m src.claims` prints the same claims table in the terminal.
+| `notebooks/01_signals_emd_imf_selection.ipynb` | noise mix, ECG scaling, EMD of a noisy ECG, Sec. III-A IMF choice |
+| `notebooks/02_filter_tuning_bw_pli.ipynb` | tuned filter settings; BW + PLI: Figs. 6, 7, 8 with tables |
+| `notebooks/03_four_noises_and_claims.ipynb` | four noises: Figs. 9, 10, 11 with tables; the paper's claims checked |
 
 ## Code
 
 | File | Contents |
 |---|---|
-| `src/config.py` | every setting: records, SNRs, IMFs per noise, LMS grid, data length |
-| `src/data.py` | MIT-BIH ECG + NSTDB noise + 60 Hz PLI -> noisy ECG at a given SNR |
-| `src/emd.py` | PyEMD decomposition into 8 IMFs + residue |
-| `src/filters.py` | LMS, NLMS, RLS noise cancellers (Fig. 1) |
-| `src/methods.py` | Fig. 2, Eq. (1), PEAF, SEAF, SDAF, PDAF |
-| `src/metrics.py` | SNR, RMSE, SNRimp (Eqs. 4-6) |
-| `src/claims.py` | the paper's claims, checked against `results/` |
-| `src/plots.py`, `src/utils.py` | example plot; case lists, parallel run, saving |
+| `src/config.py` | every setting; `[PAPER]` = from the paper, `[OURS]` = our choice |
+| `src/data.py` | MIT-BIH ECG + NSTDB noise + 60 Hz PLI → noisy ECG at a given SNRin |
+| `src/emd.py` | EMD with MATLAB `emd()` defaults; results cached in `cache/` |
+| `src/filters.py` | LMS, NLMS, RLS noise cancellers (Fig. 1), numba |
+| `src/methods.py` | Fig. 2, Eq. (1), PEAF (Eq. 2), SEAF (Eq. 3), SDAF (Fig. 5), PDAF |
+| `src/metrics.py` | SNR, RMSE, SNRimp (Eqs. 4–6) |
+| `src/tuning.py` | grid search of the filter settings |
+| `src/paper_values.py` | numbers read off the paper's figures |
+| `src/plots.py`, `src/utils.py` | plot helpers; case loading, parallel runs, saving |
 
-## Setup
+## Taken from the paper
 
-- First 10 % of each record (65 000 samples, 3.6 min at 360 Hz).
-- Noise: NSTDB `bw`, `em`, `ma` (shifted and filtered before being added, as in Sec. IV) + 60 Hz
-  PLI with the power of BW; total scaled to SNRin.
-- IMFs per noise, as in the paper (Sec. III-A): **PLI -> IMF1, BW -> IMF5-8, EM -> IMF3-8,
-  MA -> whole signal (no EMD)**.
-- EMD: PyEMD with 10 sifting iterations per IMF (`EMD_SIFTINGS`). PyEMD's default stopping rule
-  over-sifts these signals: its IMF8 is still at ~7 Hz, so all of BW (~0.3 Hz) lands in the
-  residue and the paper's IMF5-8 BW filter cannot remove anything (SNRimp 0 dB). With 10 sifts
-  the IMFs are about one octave apart (IMF1 ~70 Hz ... IMF8 ~0.2 Hz), as the paper assumes.
-- **Residue filtering (`FILTER_RESIDUE = True`, a change from the paper).** Even with good IMFs,
-  about 35 % of the BW noise and 12 % of the EM noise is slower than IMF8 and sits in the EMD
-  residue, which the paper adds back unfiltered (Eqs. 1-3). With a least-squares "oracle"
-  filter (the best any linear filter could do), the paper's IMF5-8 branch can remove at most
-  ~9 dB of BW, against ~32 dB for a filter on the whole signal. So the BW branch filters
-  IMF5-8 + residue and the EM branch IMF3-8 + residue (the residue's mean, i.e. the ECG's DC
-  offset, is left out of the filter and added back). Set `FILTER_RESIDUE = False` for the
-  paper's exact equations.
+- MIT-BIH Arrhythmia ECG, MIT-BIH Noise Stress Test BW / EM / MA, PLI = 60 Hz sinusoid, fs = 360 Hz.
+- The reference for each adaptive filter is the noise itself. The noise added to the ECG is
+  "shifted and passed through different filters".
+- IMFs per noise (Sec. III-A): **PLI → IMF1, BW → IMF5~8, EM → IMF3~8, MA → whole signal**.
+- Structures: Eq. (1) for BW + PLI; PEAF (Eq. 2), SEAF (Eq. 3), SDAF (Fig. 5, Thakor & Zhu
+  + an MA stage) and PDAF (all noises as one, one filter) for four noises. MA is filtered last.
+- LMS for every method except Fig. 7, which compares LMS / NLMS / RLS.
+- Records: Fig. 8 uses 119, 202, 213, 217, 234; Fig. 10 uses 100, 103, 104, 105, 106, 111, 113,
+  115, 116, 121, 122, 123, 231. SNRin: Fig. 7 uses −5, 0, 5, 7, 10; Fig. 8 uses 10;
+  Fig. 11 uses −5, −2, 0, 3, 6, 10 dB.
+- Metrics: Eqs. (4)–(6).
 
-## LMS parameters (the main fix)
+## What the paper does not give (our choices)
 
-Problems in the old code:
-1. The reference noise was scaled with the SNR, so a fixed step size acted ~30x larger at
-   -5 dB than at 10 dB. **Fix:** each reference is scaled to unit power inside the filter.
-2. One step size and tap count for all filters. **Fix:** every filter has its own setting.
-3. The settings were picked on the same records they were tested on. **Fix:** tuning uses
-   held-out records (101, 112, 117, 201, 220) and a different part of the noise records.
+| Item | Our choice | Why |
+|---|---|---|
+| Data length | 10 % of each record (65 000 samples ≈ 3 min), ECG from the start, noise from the start (tuning: from sample 325 000) | records are long |
+| ECG scaling | zero mean, peak \|x\| = 1 | In Figs. 6 and 9 the clean ECG sits at baseline ≈ 0 with R ≈ 1 and has no DC in its spectrum. Fig. 7's RMSE and SNRout together imply a clean ECG RMS of ≈ 0.16 (ours: 0.18; raw mV would be ≈ 0.6) |
+| Noise scaling | NSTDB records in mV, mean removed, **natural ratio kept** (EM 46.6 %, BW 24.7 %, MA 3.9 % of the noise power), PLI with the power of BW (24.7 %). The sum is scaled by one gain so Eq. (4) gives exactly SNRin | keeps the stress-test noises as recorded |
+| References | the noise records themselves, **not** scaled with SNRin (like a real reference electrode) | a step size then means the same at every SNRin |
+| "Shift + filter" of the added noise | BW: 5-sample delay, FIR [0.5 0.3 0.2]; EM: 3, [0.6 0.3 0.1]; MA: 2, [0.7 0.2 0.1]; PLI: 45° phase shift | correlated with but not equal to the reference |
+| EMD | MATLAB `emd()` defaults: cubic spline envelopes, sifting stops at relative tolerance 0.2 or 100 sifts; 8 IMFs + residue | the paper used MATLAB |
+| Filter settings | **tuned**: every filter of every method gets its own (μ, taps) for LMS / NLMS or (λ, taps) for RLS. Coordinate descent over a grid, maximizing mean SNRimp on **held-out** records 101, 112, 117, 201, 220 at −5, 0, 5, 10 dB with another noise segment. One setting per filter for all SNRin. RLS P(0) = 1000·I | not given |
+| SDAF parallel stage | PLI and BW LMS filters on the noisy ECG with one shared error | Fig. 5 shows them in parallel |
+| Fig. 7 / Fig. 11 records | mean over the Fig. 8 / Fig. 10 records | not stated |
+| Fig. 10 SNRin | both −5 dB and 10 dB | the text says 10 dB, but the values (~9–11 dB) match Fig. 11 at −5 dB (Fig. 11 at 10 dB: ~3.5–4.3 dB) |
+| Examples (Figs. 6, 9) | record 234 (Fig. 6) and 100 (Fig. 9), SNRin 5 dB | not stated |
 
-Chosen settings (mean SNRimp over the tuning cases at -5, 0, 5, 10 dB; `results/lms_params.json`):
+Tuned settings (`results/tuned_filter_params.json`):
 
-| Filter | Input | raw ECG: mu, taps | normalized ECG: mu, taps |
-|---|---|---|---|
-| PLI | IMF1 | 0.01, 8 | 0.01, 4 |
-| BW | IMF5-8 + residue | 3e-4, 4 | 1e-4, 4 |
-| EM | IMF3-8 + residue | 1e-4, 8 | 3e-5, 16 |
-| MA | whole signal | 3e-5, 8 | 1e-4, 8 |
-| PLI / BW / EM (SDAF, no EMD) | whole signal | 0.01, 1 / 1e-5, 16 / 3e-5, 8 | 0.01, 1 / 3e-4, 2 / 3e-5, 16 |
-| all noises (PDAF) | whole signal | 3e-4, 1 | 1e-4, 8 |
-
-mu is for a unit-power reference. The best mu still drops with rising SNRin (the ECG itself
-disturbs the LMS update), but one setting per filter loses at most 2.7 dB against the
-per-SNR best (`results/lms_params_summary.csv`, `figures/lms_tuning_vs_snr_*.png`).
+| Method | PLI | BW | EM | MA |
+|---|---|---|---|---|
+| EMD+LMS | μ 0.01, 16 taps | μ 3e-4, 8 | | |
+| EMD+NLMS | μ 0.03, 16 | μ 1e-3, 64 | | |
+| EMD+RLS | λ 1, 4 | λ 1, 8 | | |
+| PEAF | μ 0.03, 4 | μ 3e-5, 32 | μ 1e-4, 8 | μ 3e-3, 4 |
+| SEAF | μ 0.03, 4 | μ 1e-4, 8 | μ 1e-4, 8 | μ 3e-3, 4 |
+| SDAF | μ 3e-3, 16 | μ 1e-4, 8 | μ 1e-4, 8 | μ 3e-3, 4 |
+| PDAF | one filter, all references summed: μ 3e-4, 8 taps | | | |
 
 ## Results
 
-Mean SNRimp (dB) over the records. "paper eqs" = `FILTER_RESIDUE = False`, "+ residue" = `True`.
+Full tables: `results/comparison_with_paper.md`.
 
-**BW + PLI, EMD + LMS (Eq. 1)**
+**Sec. III-A, IMF choice** (each noise alone, mean SNRimp on held-out cases). The paper's
+choice is best for PLI (IMF1, 29.0 dB) and MA (no EMD, 13.5 dB). For BW (IMF5~8: 13.9 dB
+vs 14.2 dB with no EMD) and EM (IMF3~8: 13.4 dB vs 13.7 dB for IMF1~8) it is within 0.3 dB
+of the best, about the size of the differences between neighbouring grid settings. Every
+BW range that ends at IMF8 gives ~14 dB. We therefore keep the paper's IMFs.
 
-| SNRin | -5 | 0 | 5 | 7 | 10 |
+**BW + PLI (Figs. 7, 8)**, mean SNR output (dB), ours (paper):
+
+| SNRin | −5 | 0 | 5 | 7 | 10 |
 |---|---|---|---|---|---|
-| raw ECG, paper eqs | 11.0 | 11.0 | 10.8 | 10.3 | 8.7 |
-| raw ECG, + residue | 20.3 | 17.9 | 14.2 | 12.2 | 9.5 |
-| raw ECG, LMS without EMD | 15.6 | 15.2 | 14.4 | 13.8 | 12.6 |
-| norm ECG, + residue | 18.5 | 17.3 | 15.1 | 13.6 | 11.5 |
-| norm ECG, LMS without EMD | 18.5 | 17.1 | 14.6 | 13.3 | 11.0 |
+| EMD+LMS | 13.4 (10.0) | 17.3 (11.0) | 20.1 (12.4) | 20.6 (17.3) | 21.4 (22.2) |
+| EMD+RLS | 20.2 (8.2) | 21.0 (9.1) | 23.8 (12.2) | 23.6 (16.6) | 23.6 (21.9) |
+| EMD+NLMS | 9.8 (5.1) | 11.7 (7.2) | 12.7 (13.1) | 12.4 (18.6) | 13.3 (24.4) |
 
-Fig. 8 (SNRout at 10 dB, raw ECG, records 119 / 202 / 213 / 217 / 234):
-paper 24.6 / 22.6 / 25.0 / 29.2 / 23.9; ours EMD + RLS 30.2 / 20.0 / 24.7 / 24.7 / 19.7;
-EMD + LMS 24.0 / 16.8 / 22.1 / 19.0 / 15.7.
+- Our EMD + LMS beats the paper's up to 7 dB SNRin and is 0.8 dB below it at 10 dB. Our
+  SNRout levels off at high SNRin; the paper's keeps rising.
+- RLS (λ = 1) is best for us at every SNRin. The paper finds LMS best at low SNRin and NLMS
+  best at high SNRin.
+- Fig. 8 (SNRin 10 dB): 24.9 / 19.5 / 23.7 / 20.3 / 18.9 dB vs the paper's
+  24.7 / 22.9 / 25.0 / 29.2 / 23.9. Ours beats the best of articles [21, 22, 28] on 2/5 records.
 
-**BW + PLI + EM + MA (Fig. 11)**
+**BW + PLI + EM + MA (Figs. 10, 11)**, mean SNRimp (dB) over 13 records, ours (paper):
 
-| SNRin | -5 | -2 | 0 | 3 | 6 | 10 |
+| SNRin | −5 | −2 | 0 | 3 | 6 | 10 |
 |---|---|---|---|---|---|---|
-| PEAF, paper | 10.2 | 9.5 | 9.4 | 7.0 | 5.6 | 4.3 |
-| raw: PEAF / SEAF, paper eqs | 10.4 / 11.0 | 9.7 / 10.3 | 9.2 / 9.8 | 8.3 / 8.8 | 7.2 / 7.7 | 5.1 / 5.5 |
-| raw: PEAF / SEAF, + residue | 8.5 / 10.5 | 8.2 / 10.2 | 7.9 / 9.8 | 7.1 / 8.8 | 6.0 / 7.5 | 3.7 / 4.9 |
-| norm: PEAF / SEAF, + residue | 11.2 / 12.3 | 10.5 / 11.6 | 9.8 / 10.8 | 8.5 / 9.3 | 6.7 / 7.5 | 3.8 / 4.3 |
-| raw: PDAF / SDAF | 11.3 / 12.9 | 11.2 / 12.4 | 11.1 / 11.9 | 10.7 / 10.9 | 10.0 / 9.4 | 8.6 / 6.7 |
-| norm: PDAF / SDAF | 14.3 / 11.4 | 13.8 / 10.7 | 13.2 / 10.0 | 12.1 / 8.7 | 10.6 / 6.9 | 7.9 / 3.9 |
+| PEAF | 12.5 (10.4) | 12.0 (9.6) | 11.5 (9.4) | 10.5 (7.2) | 9.1 (5.6) | 6.5 (4.3) |
+| SEAF | 13.3 (10.4) | 12.8 (9.1) | 12.2 (8.8) | 11.1 (6.8) | 9.7 (5.3) | 7.1 (4.1) |
+| PDAF | 14.9 (10.3) | 13.9 (9.2) | 13.0 (8.7) | 11.3 (6.6) | 9.2 (4.8) | 5.9 (3.5) |
+| SDAF | 13.4 (10.3) | 12.8 (8.8) | 12.3 (8.2) | 11.3 (6.2) | 9.8 (4.5) | 7.2 (3.4) |
 
-- Filtering the residue makes EMD worthwhile for BW + PLI: EMD + LMS gains up to 9 dB and, with
-  the normalized ECG, beats LMS without EMD at 4 of 5 SNRin levels. EMD + RLS comes close to the
-  paper's Fig. 8 numbers.
-- With all four noises the paper's ranking is still not reproduced: PDAF (one filter, no EMD)
-  is best on all 13 records at 10 dB (Fig. 10). SEAF beats PEAF. Residue filtering helps PEAF
-  and SEAF with the normalized ECG (+1 to +2 dB at low SNRin) but costs PEAF ~2 dB with the raw
-  ECG. Filtering the residue only in the BW branch was also tried: worse (PEAF 6.0 dB at -5 dB).
-- NLMS with MATLAB's default step 0.1 is worst in every case; RLS beats LMS (Fig. 7).
+- Like the paper: SNRimp falls as SNRin rises, for every method. Our values are 2–5 dB higher.
+- Unlike the paper: **PEAF is not the best method**. It is the lowest of the four at 5 of 6
+  SNRin and is not the best on any record in Fig. 10 (at −5 or 10 dB). PDAF (one filter, no
+  EMD) is best from −5 to 3 dB, SDAF at 6 and 10 dB. SEAF beats PEAF at every SNRin.
 
-## Does normalizing the ECG help?
+**Claims of the paper**: reproduced: PLI → IMF1, MA → no EMD, SNRimp falls with SNRin.
+Partly: BW / EM IMF choice, Fig. 8 numbers, beating articles [21, 22, 28], PEAF level.
+Not reproduced: LMS best in Fig. 7, PEAF best (Figs. 10, 11), EMD methods beat direct ones.
 
-It depends on the method (`scripts/04_ecg_norm_check.py`). Mean change in SNRimp, normalized
-minus raw: PEAF +1.6 dB, PDAF +1.5 dB, SEAF +0.7 dB, EMD + LMS +0.4 dB, RLS -1.2 dB,
-NLMS -2.0 dB, SDAF -2.1 dB. Scaling the ECG alone changes nothing (LMS is linear in its
-input); the difference comes from removing the DC offset. The raw MIT-BIH ECG has a large
-offset (up to 92 % of its power, record 121), which Eq. (4) counts as signal, so at a given
-SNRin the raw ECG gets more noise relative to its waveform. Normalizing gives a fairer SNR
-definition and helps the paper's proposed methods (PEAF, SEAF) with residue filtering.
+## Notes on the paper
+
+- Fig. 10: the text says SNRin = 10 dB, but the values match Fig. 11 at −5 dB.
+- Fig. 7: the text says LMS is best, but in its own figure NLMS has the highest SNR output at
+  5, 7 and 10 dB.
+- Fig. 7 vs Fig. 8: at SNRin 10 dB, LMS + EMD is 22.2 dB in Fig. 7 but 22.9–29.2 dB (mean 25.1)
+  in Fig. 8; the records of Fig. 7 are not named.
+- Sec. III-A calls EM "a high frequency noise", but 73 % of the NSTDB `em` record's power is
+  below 0.5 Hz (BW: 98 %, MA: 72 %).

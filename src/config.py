@@ -1,7 +1,10 @@
 """
-All settings of the experiments in one place.
+Every setting of the reproduction in one place.
 
-Paper: Dai & Bai, "Denoising ECG by adaptive filter with empirical mode decomposition".
+Paper: B. Dai and W. Bai, "Denoising ECG by adaptive filter with empirical mode decomposition".
+
+Settings marked [PAPER] are taken from the paper as given. Settings marked [OURS] are not
+given in the paper and are our choice (see README.md, "What the paper does not give").
 """
 from pathlib import Path
 
@@ -10,96 +13,93 @@ MITDB_DIR = ROOT / "data" / "physionet.org" / "files" / "mitdb" / "1.0.0"
 NSTDB_DIR = ROOT / "data" / "physionet.org" / "files" / "nstdb" / "1.0.0"
 RESULTS_DIR = ROOT / "results"
 FIGURES_DIR = RESULTS_DIR / "figures"
-LMS_PARAMS_FILE = RESULTS_DIR / "lms_params.json"
+CACHE_DIR = ROOT / "cache"  # EMD results, so each noisy ECG is decomposed only once
+TUNED_PARAMS_FILE = RESULTS_DIR / "tuned_filter_params.json"
 
-# ---------------------------------------------------------------- test signals
+# ------------------------------------------------------------------ signals
 
-FS = 360
+FS = 360                 # [PAPER] MIT-BIH sampling rate (spectra in Figs. 6, 9 go to 180 Hz)
 RECORD_LENGTH = 650_000  # samples in a 30 min MIT-BIH / NSTDB record
-DATA_FRACTION = 0.1      # only the first 10 % of every ECG record is used
-N_SAMPLES = int(RECORD_LENGTH * DATA_FRACTION)  # 65 000 samples = 3.6 min
-# Noise segments: the paper's test cases use the start of the NSTDB noise records; the LMS
-# tuning uses a different part of the noise records (and different ECG records)
-TEST_NOISE_START = 0
-TUNE_NOISE_START = 325_000
+DATA_FRACTION = 0.10     # [OURS] use 10 % of each ECG and noise record
+N_SAMPLES = int(RECORD_LENGTH * DATA_FRACTION)  # 65 000 samples = 3 min 0.5 s
 
-PLI_FREQ = 60.0
+ECG_START = 0            # [OURS] the 10 % ECG segment starts at the beginning of the record
+TEST_NOISE_START = 0     # [OURS] noise segment used for every figure
+TUNE_NOISE_START = 325_000  # [OURS] a different noise segment, used only to tune the filters
+ECG_CHANNEL = 0          # [OURS] MLII on almost every MIT-BIH record
+NOISE_CHANNEL = 0        # [OURS] first channel of the NSTDB noise records
 
-# Sec. IV: the added noise is a "shifted and filtered" copy of the reference noise.
-# The paper gives no values, so these are fixed choices: (delay in samples, FIR taps)
+# [OURS, confirmed by Figs. 6, 7, 9] ECG scaling: x <- (x - mean) / max|x - mean|.
+# Figs. 6 and 9 show the clean ECG at baseline ~0 with R peaks ~1 and no DC in its
+# spectrum; Fig. 7's RMSE and SNRout together imply a clean ECG RMS of ~0.16.
+ECG_SCALING = "zero_mean_peak_one"
+
+PLI_FREQ = 60.0          # [PAPER] PLI is a 60 Hz sinusoid
+
+# [OURS] How the noises are combined. Each NSTDB noise keeps its recorded amplitude (in mV,
+# mean removed), so their natural ratio is kept: on the test segment BW ~25 %, EM ~47 %,
+# MA ~4 % of the noise power. PLI gets the same power as BW. The sum of all noises is then
+# scaled by one gain so that Eq. (4) gives exactly the requested SNRin.
+PLI_POWER_LIKE = "bw"
+
+# [PAPER] "the noises all have been shifted and passed through different filters to get
+# noises that are not equal but correlated to the adaptive filters' reference noises".
+# [OURS] the shift (delay in samples) and FIR filter of each noise. The adaptive filter gets
+# the noise record itself as reference; the ECG gets the delayed and filtered version.
 NOISE_PATHS = {
-    "bw": (3, [0.6, 0.4]),
-    "em": (5, [0.4, 0.3, 0.2, 0.1]),
-    "ma": (4, [0.5, 0.3, 0.2]),
+    "bw": {"delay": 5, "fir": [0.5, 0.3, 0.2]},
+    "em": {"delay": 3, "fir": [0.6, 0.3, 0.1]},
+    "ma": {"delay": 2, "fir": [0.7, 0.2, 0.1]},
 }
+# [OURS] the PLI added to the ECG is phase shifted against the 60 Hz reference
+PLI_PHASE_SHIFT = 0.25 * 3.141592653589793  # rad
 
-# ECG normalization modes compared in every experiment:
-# "raw"  = MIT-BIH signal as recorded (in mV, with its DC offset)
-# "norm" = zero mean, unit standard deviation
-ECG_MODES = ("raw", "norm")
+# ------------------------------------------------------------------ records and SNRs
 
-# ---------------------------------------------------------------- records and SNRs
+FIG8_RECORDS = [119, 202, 213, 217, 234]                                       # [PAPER]
+FIG10_RECORDS = [100, 103, 104, 105, 106, 111, 113, 115, 116, 121, 122, 123, 231]  # [PAPER]
+FIG7_RECORDS = FIG8_RECORDS    # [OURS] Fig. 7 does not name its records: mean over Fig. 8's
+FIG11_RECORDS = FIG10_RECORDS  # [OURS] Fig. 11 does not name its records: mean over Fig. 10's
 
-FIG8_RECORDS = [119, 202, 213, 217, 234]
-FIG10_RECORDS = [100, 103, 104, 105, 106, 111, 113, 115, 116, 121, 122, 123, 231]
-FIG7_SNRS = [-5, 0, 5, 7, 10]
-FIG11_SNRS = [-5, -2, 0, 3, 6, 10]
+FIG7_SNRS = [-5, 0, 5, 7, 10]       # [PAPER]
+FIG8_SNR = 10                       # [PAPER]
+FIG11_SNRS = [-5, -2, 0, 3, 6, 10]  # [PAPER]
+# [PAPER] the text says Fig. 10 is at SNRin = 10 dB, but its values (~9-11 dB) match
+# Fig. 11 at -5 dB (Fig. 11 at 10 dB is ~3.5-4.3 dB). We make Fig. 10 at both.
+FIG10_SNRS = [-5, 10]
 
-# Held-out records for the LMS tuning: not used in any figure of the paper, no pacemaker
+# [OURS] examples of Figs. 6 and 9 (the paper does not say which record or SNRin)
+FIG6_EXAMPLE = {"record": 234, "snr": 5}
+FIG9_EXAMPLE = {"record": 100, "snr": 5}
+EXAMPLE_SAMPLES = 5000  # [PAPER] Figs. 6, 9 show 5000 samples
+
+# [OURS] filter tuning uses records that appear in no figure (no paced records) and a
+# different noise segment, so the tuned settings are not fitted to the test cases
 TUNE_RECORDS = [101, 112, 117, 201, 220]
 TUNE_SNRS = [-5, 0, 5, 10]
 
-# ---------------------------------------------------------------- EMD and IMFs
+# ------------------------------------------------------------------ EMD
 
+# [PAPER] the methods use IMF1 ... IMF8 and the residue r (Eqs. 1-3)
 N_IMFS = 8
+# [OURS] the paper used MATLAB; we follow MATLAB's emd() defaults: cubic spline envelopes,
+# sifting stops when ||h_prev - h||^2 / ||h_prev||^2 < 0.2 or after 100 sifts.
+SIFT_RELATIVE_TOLERANCE = 0.2
+SIFT_MAX_ITERATIONS = 100
 
-# PyEMD sifting: a fixed number of sifting iterations per IMF (Huang's recommended ~10).
-# PyEMD's default stopping rule sifts up to 1000 times on these signals, which makes the
-# IMFs narrow-band and closely spaced (IMF8 at ~7 Hz), so BW ends up in the residue and
-# the paper's IMF split (BW in IMF5-8) cannot work. With 10 sifts each IMF is roughly an
-# octave lower than the one before (IMF1 ~70 Hz ... IMF8 ~0.2 Hz), as the paper assumes.
-EMD_SIFTINGS = 10
-
-# Sec. III-A: the IMFs each noise's adaptive filter works on (1-based, inclusive).
+# [PAPER] Sec. III-A: the IMFs each noise's adaptive filter works on (1-based, inclusive).
 # None = the whole signal, no EMD.
-PAPER_IMFS = {
-    "pli": (1, 1),
-    "bw": (5, 8),
-    "em": (3, 8),
-    "ma": None,
-}
+NOISE_IMFS = {"pli": (1, 1), "bw": (5, 8), "em": (3, 8), "ma": None}
 
-# Also filter the EMD residue in the branches that end at IMF8 (BW: IMF5-8 + r,
-# EM: IMF3-8 + r). The paper adds the residue back unfiltered (Eqs. 1-3), but about a third
-# of the BW noise and an eighth of the EM noise is slower than IMF8 and sits in the
-# residue, where no filter can reach it. The residue's mean (the ECG's DC offset) is
-# left out of the filter input and added back. False = exactly as in the paper.
-FILTER_RESIDUE = True
+# ------------------------------------------------------------------ adaptive filters
 
-# ---------------------------------------------------------------- adaptive filters
-
-# LMS grid searched by scripts/01_tune_lms.py. The reference is scaled to unit power
-# inside the filter, so the step size does not depend on the scale of the noise records.
-LMS_MUS = [1e-6, 3e-6, 1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2]
+# [OURS] search grids. Every filter of every method gets its own setting, tuned on the
+# held-out cases (scripts/01_tune_filters.py). The reference keeps its recorded scale (it
+# does not change with SNRin), so one step size behaves the same at every SNRin.
+LMS_MUS = [1e-5, 3e-5, 1e-4, 3e-4, 1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1.0, 3.0]
+NLMS_MUS = [1e-3, 3e-3, 1e-2, 3e-2, 1e-1, 3e-1, 1.0]
+RLS_LAMBDAS = [0.99, 0.995, 0.999, 0.9995, 0.9999, 1.0]
 LMS_TAPS = [1, 2, 4, 8, 16, 32, 64]
-
-# Fig. 7 compares LMS with NLMS and RLS at "default parameters in MATLAB"
-# (dsp.LMSFilter / dsp.RLSFilter): 32 taps, NLMS step 0.1, RLS forgetting factor 1,
-# initial inverse covariance 1000
-MATLAB_TAPS = 32
-NLMS_MU = 0.1
-RLS_LAMBDA = 1.0
-RLS_P0 = 1000.0
-
-# ---------------------------------------------------------------- paper numbers
-
-# Fig. 8, read off the plot (about +-0.3 dB): SNR output at SNRin = 10 dB
-PAPER_FIG8 = {
-    "Proposed LMS+EMD (paper)": [24.6, 22.6, 25.0, 29.2, 23.9],
-    "Article [28]": [17.9, 23.0, 20.0, 25.9, 20.4],
-    "Article [21]": [16.5, 20.4, 17.9, 24.0, 18.9],
-    "Article [22]": [13.9, 18.9, 15.9, 22.9, 18.5],
-}
-
-# Fig. 11, PEAF line, read off the plot (about +-0.5 dB): SNRimp vs SNRin
-PAPER_FIG11_PEAF = {-5: 10.2, -2: 9.5, 0: 9.4, 3: 7.0, 6: 5.6, 10: 4.3}
+RLS_TAPS = [1, 2, 4, 8, 16, 32]
+RLS_P0 = 1000.0  # [OURS] initial inverse covariance P(0) = 1000 I, MATLAB's dsp.RLSFilter default
+TUNING_PASSES = 2  # [OURS] coordinate-descent passes over the filters of a method

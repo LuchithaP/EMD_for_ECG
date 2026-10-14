@@ -1,69 +1,89 @@
 """
-Test signals (Sec. IV of the paper): MIT-BIH Arrhythmia ECG + MIT-BIH Noise Stress Test
-noises (BW, EM, MA) + 60 Hz power line interference (PLI).
+Test signals (Sec. IV): MIT-BIH Arrhythmia ECG + MIT-BIH Noise Stress Test noises (BW, EM,
+MA) + 60 Hz power line interference (PLI).
+
+A "case" is one noisy ECG: make_case(record, noises, snr) returns the clean ECG, the noisy
+ECG and the reference noise of every adaptive filter.
 """
 import numpy as np
 import wfdb
 
-from src.config import (FS, MITDB_DIR, N_SAMPLES, NOISE_PATHS, NSTDB_DIR, PLI_FREQ,
+from src.config import (ECG_CHANNEL, ECG_START, FS, MITDB_DIR, N_SAMPLES, NOISE_CHANNEL,
+                        NOISE_PATHS, NSTDB_DIR, PLI_FREQ, PLI_PHASE_SHIFT, PLI_POWER_LIKE,
                         TEST_NOISE_START)
 
+ALL_NOISES = ("bw", "em", "ma", "pli")
 
-def load_ecg(record, mode="raw"):
-    """First N_SAMPLES of channel 0 of an MIT-BIH record. mode "norm": zero mean, unit std."""
-    x = wfdb.rdrecord(str(MITDB_DIR / str(record)), sampto=N_SAMPLES).p_signal[:, 0]
-    if mode == "norm":
-        x = (x - x.mean()) / x.std()
-    return x
+
+def load_ecg(record):
+    """10 % of an MIT-BIH record, zero mean and peak |x| = 1."""
+    x = wfdb.rdrecord(str(MITDB_DIR / str(record)), sampfrom=ECG_START,
+                      sampto=ECG_START + N_SAMPLES, channels=[ECG_CHANNEL]).p_signal[:, 0]
+    x = x - x.mean()
+    return x / np.abs(x).max()
 
 
 def load_noise(name, start=TEST_NOISE_START):
-    """N_SAMPLES of an NSTDB noise record ('bw', 'em' or 'ma'), from sample `start`."""
-    rec = wfdb.rdrecord(str(NSTDB_DIR / name), sampfrom=start, sampto=start + N_SAMPLES)
-    return rec.p_signal[:, 0]
+    """10 % of an NSTDB noise record ('bw', 'em' or 'ma'), in mV with its mean removed."""
+    x = wfdb.rdrecord(str(NSTDB_DIR / name), sampfrom=start, sampto=start + N_SAMPLES,
+                      channels=[NOISE_CHANNEL]).p_signal[:, 0]
+    return x - x.mean()
 
 
-def make_pli(amplitude, n=N_SAMPLES):
-    """60 Hz sinusoid."""
-    t = np.arange(n) / FS
-    return amplitude * np.sin(2 * np.pi * PLI_FREQ * t)
-
-
-def shift_and_filter(reference, delay, taps):
-    """The noise that reaches the ECG: the reference delayed and FIR filtered."""
-    h = np.concatenate([np.zeros(delay), taps])
+def noise_path(reference, name):
+    """The noise that reaches the ECG: the reference shifted (delayed) and FIR filtered."""
+    path = NOISE_PATHS[name]
+    h = np.concatenate([np.zeros(path["delay"]), path["fir"]])
     return np.convolve(reference, h)[: len(reference)]
 
 
-def snr_gain(clean, noise, snr_db):
-    """Gain that makes 10 log10(sum clean^2 / sum (gain * noise)^2) equal snr_db (Eq. 4)."""
-    return np.sqrt(np.sum(clean**2) / (np.sum(noise**2) * 10 ** (snr_db / 10)))
+def pli(power, phase=0.0, n=N_SAMPLES):
+    """60 Hz sinusoid with the given power."""
+    t = np.arange(n) / FS
+    return np.sqrt(2 * power) * np.sin(2 * np.pi * PLI_FREQ * t + phase)
 
 
-def make_case(record, noises, snr_db, ecg_mode="raw", noise_start=TEST_NOISE_START):
+def noise_signals(noises, noise_start=TEST_NOISE_START):
     """
-    One noisy ECG.
+    References and added noises, before the SNR gain: ({name: reference}, {name: added}).
 
-    noises: any of "bw", "em", "ma", "pli".
-    - BW, EM, MA: the reference is the NSTDB record; the noise added to the ECG is the
-      shifted and filtered reference (NOISE_PATHS).
-    - PLI: 60 Hz sinusoid with the same power as the BW noise; its reference is the
-      PLI itself (the paper shifts and filters only BW, EM and MA).
-    The total noise is scaled so that the input SNR (Eq. 4) equals snr_db.
-
-    Returns a dict: clean, noisy, refs ({noise name: reference}).
+    - BW, EM, MA: the reference is the NSTDB record (mV, natural amplitude); the noise
+      added to the ECG is the shifted and filtered reference (noise_path).
+    - PLI: the reference is a 60 Hz sinusoid with the power of the BW record; the noise
+      added to the ECG is the same sinusoid, phase shifted.
     """
-    clean = load_ecg(record, ecg_mode)
-    added, refs = [], {}
+    refs, added = {}, {}
     for name in ("bw", "em", "ma"):
         if name in noises:
             refs[name] = load_noise(name, noise_start)
-            added.append(shift_and_filter(refs[name], *NOISE_PATHS[name]))
+            added[name] = noise_path(refs[name], name)
     if "pli" in noises:
-        bw = shift_and_filter(load_noise("bw", noise_start), *NOISE_PATHS["bw"])
-        refs["pli"] = make_pli(np.sqrt(2 * np.mean(bw**2)))
-        added.append(refs["pli"])
+        power = np.mean(load_noise(PLI_POWER_LIKE, noise_start) ** 2)
+        refs["pli"] = pli(power)
+        added["pli"] = pli(power, PLI_PHASE_SHIFT)
+    return refs, added
 
-    total = sum(added)
-    noisy = clean + total * snr_gain(clean, total, snr_db)
-    return {"clean": clean, "noisy": noisy, "refs": refs}
+
+def make_case(record, noises, snr, noise_start=TEST_NOISE_START):
+    """
+    One noisy ECG: the added noises are summed and scaled by ONE gain so that SNRin
+    (Eq. 4) equals `snr`, which keeps the natural power ratio between the noises. The
+    references are not scaled: like a real reference electrode, their level does not
+    depend on SNRin.
+
+    Returns {"clean", "noisy", "refs": {noise: reference}, "record", "snr", "noises"}.
+    """
+    clean = load_ecg(record)
+    refs, added = noise_signals(noises, noise_start)
+    total = np.sum(list(added.values()), axis=0)
+    gain = np.sqrt(np.sum(clean**2) / (np.sum(total**2) * 10 ** (snr / 10)))
+    return {"clean": clean, "noisy": clean + gain * total, "refs": refs,
+            "record": record, "snr": snr, "noises": tuple(noises)}
+
+
+def noise_shares(noises=ALL_NOISES, noise_start=TEST_NOISE_START):
+    """{noise: share of the total added noise power}."""
+    _, added = noise_signals(noises, noise_start)
+    powers = {name: np.mean(x**2) for name, x in added.items()}
+    total = sum(powers.values())
+    return {name: p / total for name, p in powers.items()}
