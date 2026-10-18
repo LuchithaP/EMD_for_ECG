@@ -99,7 +99,7 @@ def sdaf(noisy, imfs, r, f):
 def pdaf(noisy, imfs, r, f):
     """Parallel Direct Adaptive Filter: all noises as one, one filter on the noisy ECG (Fig. 1)."""
     return f(noisy, "all")
-
+ 
 
 # ------------------------------------------------------------------ registry
 

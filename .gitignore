@@ -3,3 +3,4 @@ __pycache__/
 *.nbc
 .ipynb_checkpoints/
 cache/
+report/
