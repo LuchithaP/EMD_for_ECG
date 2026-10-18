@@ -1,4 +1,4 @@
-# ECG denoising with EMD + adaptive filters
+# ECG denoising with EMD with adaptive filters
 
 Reproduction of B. Dai and W. Bai, *Denoising ECG by Adaptive Filter with Empirical Mode
 Decomposition* (`paper.pdf`).
